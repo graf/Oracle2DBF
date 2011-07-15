@@ -38,9 +38,12 @@ private:
     QDbf::QDbfTable myCallsDbfTable;
     QDbf::QDbfTable myExtnamesDbfTable;
     QStringList myExtnamesList;
-    QHash<quint64, QString> myPhoneBook;
-    bool createSqlLiteDb();
+    QHash<QString, QStringList> myPhoneBook;
+
     bool readPhoneBook();
+    QString formatPhone(const QString &number) const;
+
+    int fillTestDb();
 };
 
 #endif // MAINWINDOW_H
