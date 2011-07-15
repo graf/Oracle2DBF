@@ -62,22 +62,10 @@ bool MainWindow::openFile()
     }
 
     ui->dbfFilePathLabel->setText(trUtf8("Выберите диапазон дат и нажмите \"Запуск\""));
-
-
-//    myDbfTable.next();
-//    QDbf::QDbfRecord rec = myDbfTable.record();
-//    rec.setValue(trUtf8("STATUS"), trUtf8("qwerty"));
-
-//    myDbfTable.addRecord(rec);
-
-//    myDbfTable.close();
+    fillTestDb();
     return true;
 }
 
-bool MainWindow::createSqlLiteDb()
-{
-
-}
 
 void MainWindow::on_openDbfButton_clicked()
 {
@@ -92,23 +80,33 @@ void MainWindow::on_processButton_clicked()
     int progress = 1;
     QDate fromDate = ui->fromDateEdit->date();
     QDate tillDate = ui->fromDateEdit->date();
+    int good = 0;
+    int bad = 0;
+    int unknown = 0;
     while (myCallsDbfTable.next()) {
         ui->progressBar->setValue(progress++);
         QDbf::QDbfRecord currentRecord = myCallsDbfTable.record();
         QDate date = QDate::fromString(currentRecord.value(trUtf8("DATE")).toString(), trUtf8("dd.MM.yyyy"));
         if (date < fromDate || date > tillDate)
             continue;
-        bool isRealDigit = false;
-        //QString rawNumber = currentRecord.value(trUtf8("NUMBER")).toString();
-        quint64 number = currentRecord.value(trUtf8("NUMBER")).toUInt(&isRealDigit);
-        if (!isRealDigit)
+        const QString rawNumber = currentRecord.value(trUtf8("NUMBER")).toString();
+        QString number = formatPhone(rawNumber);
+        if (number.isEmpty() || number.length() < 7) {
+            bad++;
             continue;
-        QString name = myPhoneBook[number];
+        }
+        QString name = myPhoneBook[number].join(trUtf8("; "));
+        if (name.isEmpty()) {
+            unknown++;
+            continue;
+        }
+
+        good++;
         int accountCode = myExtnamesList.indexOf(name);
         if (accountCode == -1) {
             if (!myExtnamesDbfTable.addRecord())
                 continue;
-            myExtnamesDbfTable.next();
+            //myExtnamesDbfTable.next();
             QDbf::QDbfRecord newRecord = myExtnamesDbfTable.record();
             accountCode = myExtnamesList.count();
             newRecord.setValue(trUtf8("ACCNTCODE"), accountCode);
@@ -117,14 +115,138 @@ void MainWindow::on_processButton_clicked()
         }
         currentRecord.setValue(trUtf8("ACCOUNT"), accountCode);
     }
+    QMessageBox::information(NULL,
+                             trUtf8("Завершено"),
+                             trUtf8("Обработка завершена. Обработано номеров:\n"
+                                    "\tизвестных - %1\n"
+                                    "\tнеизвестных - %2\n"
+                                    "\tневерный формат - %3")
+                             .arg(QString::number(good))
+                             .arg(QString::number(bad))
+                             .arg(QString::number(unknown)));
 }
 
 bool MainWindow::readPhoneBook()
 {
+    QSettings mySettings(trUtf8("orajdbf.ini"), QSettings::IniFormat);
+    QString oraDnsName = mySettings.value(trUtf8("ORACLE/dnsname"), trUtf8("orajdbf")).toString();
+    QString oraUser = mySettings.value(trUtf8("ORACLE/user"), trUtf8("orajdbf")).toString();
+    QString oraPassword = mySettings.value(trUtf8("ORACLE/password"), trUtf8("orajdbf")).toString();
+    QString agentsTableName = mySettings.value(trUtf8("ORACLE/agents"), trUtf8("AGNLIST")).toString();
+    QString pAgentsTableNames = mySettings.value(trUtf8("ORACLE/pagents"), trUtf8("PAGNLIST")).toString();
+    QString agentNameField = mySettings.value(trUtf8("ORACLE/agentNameField"), trUtf8("NAME")).toString();
+    QString pAgentNameField = mySettings.value(trUtf8("ORACLE/pAgentNameField"), trUtf8("NAME")).toString();
+    QStringList agentPhoneFields = mySettings.value(trUtf8("ORACLE/agentPhoneFields"), trUtf8("AGNNAME,PHONE,FAX")).toStringList();
+    QStringList pAgentPhoneFields = mySettings.value(trUtf8("ORACLE/pAgentPhoneFields"), trUtf8("PHONE")).toStringList();
+
     QSqlDatabase oraDb = QSqlDatabase::addDatabase(trUtf8("QODBC"));
-    oraDb.setDatabaseName(trUtf8("test"));
-    oraDb.setPassword(trUtf8("orajdbf"));
-    oraDb.setUserName(trUtf8("orajdbf"));
-    bool ok = oraDb.open();
-    qDebug() << ok;
+    oraDb.setDatabaseName(oraDnsName);
+    oraDb.setUserName(oraUser);
+    oraDb.setPassword(oraPassword);
+    if (!oraDb.open()) {
+        QMessageBox::critical(NULL, trUtf8("Ошибка"), trUtf8("Ошибка соединения с ORACLE. ") + oraDb.lastError().text());
+        return false;
+    }
+
+    QSqlQuery query;
+    query.prepare(trUtf8("select * from ") + agentsTableName);
+    if (query.exec()) {
+        QMessageBox::critical(NULL, trUtf8("Ошибка"), trUtf8("Ошибка получения списка клиентов. ") + oraDb.lastError().text());
+        return false;
+    }
+
+    while (query.next()) {
+        QSqlRecord currentAgent = query.record();
+        QString name = currentAgent.value(agentNameField).toString();
+        foreach (QString field, agentPhoneFields) {
+            const QString rawPhone = currentAgent.value(field).toString();
+            QString phone = formatPhone(rawPhone);
+            myPhoneBook[phone].append(name);
+        }
+    }
+
+    query.prepare(trUtf8("select * from ") + pAgentsTableNames);
+    if (query.exec()) {
+        QMessageBox::critical(NULL, trUtf8("Ошибка"), oraDb.lastError().text());
+        return false;
+    }
+
+    while (query.next()) {
+        QSqlRecord currentAgent = query.record();
+        QString name = trUtf8("(П) ") + currentAgent.value(pAgentNameField).toString();
+        foreach (QString field, pAgentPhoneFields) {
+            const QString rawPhone = currentAgent.value(field).toString();
+            QString phone = formatPhone(rawPhone);
+            myPhoneBook[phone].append(name);
+        }
+    }
+}
+
+QString MainWindow::formatPhone(const QString &number) const
+{
+    QString result = number;
+    result.remove(QRegExp(trUtf8(",.*$")));
+    result.remove(QRegExp(trUtf8("\\D")));
+    result.remove(QRegExp(trUtf8("^([78](846)?)")));
+    return result;
+}
+
+int MainWindow::fillTestDb()
+{
+    int progress = 1;
+    QSettings mySettings(trUtf8("orajdbf.ini"), QSettings::IniFormat);
+    QString oraDnsName = mySettings.value(trUtf8("ORACLE/dnsname"), trUtf8("orajdbf")).toString();
+    QString oraUser = mySettings.value(trUtf8("ORACLE/user"), trUtf8("orajdbf")).toString();
+    QString oraPassword = mySettings.value(trUtf8("ORACLE/password"), trUtf8("orajdbf")).toString();
+    QString agentsTableName = mySettings.value(trUtf8("ORACLE/agents"), trUtf8("AGNLIST")).toString();
+    QString pAgentsTableNames = mySettings.value(trUtf8("ORACLE/pagents"), trUtf8("PAGNLIST")).toString();
+    QString agentNameField = mySettings.value(trUtf8("ORACLE/agentNameField"), trUtf8("NAME")).toString();
+    QString pAgentNameField = mySettings.value(trUtf8("ORACLE/pAgentNameField"), trUtf8("NAME")).toString();
+    QStringList agentsPhoneFields = mySettings.value(trUtf8("ORACLE/agentsPhoneFields"), trUtf8("AGNNAME,PHONE,FAX")).toStringList();
+    QStringList pAgentPhoneFields = mySettings.value(trUtf8("ORACLE/pAgentPhoneFields"), trUtf8("PHONE")).toStringList();
+
+    QSqlDatabase oraDb = QSqlDatabase::addDatabase(trUtf8("QODBC"));
+    oraDb.setDatabaseName(oraDnsName);
+    oraDb.setUserName(oraUser);
+    oraDb.setPassword(oraPassword);
+    if (!oraDb.open()) {
+        QMessageBox::critical(NULL, trUtf8("Ошибка"), trUtf8("Ошибка соединения с ORACLE. ") + oraDb.lastError().text());
+        return false;
+    }
+
+    QSqlQuery query;
+    query.prepare(trUtf8("insert into ") + agentsTableName + trUtf8(" values (:NAME, :PHONE, :PHONE2: :FAX)"));
+    while (myCallsDbfTable.next()) {
+        ui->progressBar->setValue(progress++);
+        QDbf::QDbfRecord currentRecord = myCallsDbfTable.record();
+        const QString rawPhone = currentRecord.value(trUtf8("NUMBER")).toString();
+        QString phone = formatPhone(rawPhone);
+        if (phone.isEmpty() || phone.length() < 7)
+            continue;
+        if (!myCallsDbfTable.next())
+            continue;
+        currentRecord = myCallsDbfTable.record();
+        const QString rawPhone2 = currentRecord.value(trUtf8("NUMBER")).toString();
+        QString phone2 = formatPhone(rawPhone2);
+        if (phone.isEmpty() || phone.length() < 7)
+            continue;
+        if (!myCallsDbfTable.next())
+            continue;
+        currentRecord = myCallsDbfTable.record();
+        const QString rawFax = currentRecord.value(trUtf8("NUMBER")).toString();
+        QString fax = formatPhone(rawFax);
+        if (phone.isEmpty() || phone.length() < 7)
+            continue;
+        QString name = trUtf8("Клиент") + QString::number(progress);
+
+        query.bindValue(trUtf8(":NAME"), name);
+        query.bindValue(trUtf8(":PHONE"), phone);
+        query.bindValue(trUtf8(":PHONE2"), phone2);
+        query.bindValue(trUtf8(":FAX"), fax);
+        if (!query.exec()) {
+            QMessageBox::critical(NULL, trUtf8("Ошибка"), trUtf8("Ошибка в запросе. ") + oraDb.lastError().text());
+            return false;
+        }
+    }
+
 }
