@@ -54,14 +54,29 @@ bool MainWindow::openFile()
         return false;
     }
 
-    if (!myCallsDbfTable.open(filePath, QDbf::QDbfTable::ReadWrite)) {
+    if (!myCallsTable.open(filePath, QDbf::QDbfTable::ReadWrite)) {
         const QString title = trUtf8("Ошибка открытия файла");
         const QString text = QString(trUtf8("Невозможно открыть файл %1")).arg(filePath);
         QMessageBox::warning(NULL, title, text, QMessageBox::Ok);
         return false;
     }
 
-    ui->dbfFilePathLabel->setText(trUtf8("Выберите диапазон дат и нажмите \"Запуск\""));
+    const QSettings mySettings(trUtf8("orajdbf.ini"), QSettings::IniFormat);
+    const QString extnamesFilePath = mySettings.value(trUtf8("PATH/extnames"), trUtf8("Extnames.dbf")).toString();
+    const QString extnamesEmptyFilePath = mySettings.value(trUtf8("PATH/extnamesEmpty"), trUtf8("ExtnamesEmpty.dbf")).toString();
+
+    QFile::remove(extnamesFilePath);
+    QFile::copy(extnamesEmptyFilePath, extnamesFilePath);
+
+    if (!myExtnamesTable.open(extnamesFilePath, QDbf::QDbfTable::ReadWrite)) {
+        const QString title = trUtf8("Ошибка открытия файла");
+        const QString text = QString(trUtf8("Невозможно открыть файл %1")).arg(extnamesFilePath);
+        QMessageBox::warning(NULL, title, text, QMessageBox::Ok);
+        return false;
+    }
+
+    ui->dbfFilePathLabel->setText(trUtf8("Выберите диапазон дат и нажмите \"Обработать\""));
+    //test();
     return true;
 }
 
@@ -71,26 +86,26 @@ void MainWindow::on_openDbfButton_clicked()
     ui->processButton->setEnabled(openFile());
     ui->progressBar->setValue(0);
     ui->progressBar->setMinimum(0);
-    ui->progressBar->setMaximum(myCallsDbfTable.size());
+    ui->progressBar->setMaximum(myCallsTable.size());
 }
 
 void MainWindow::on_processButton_clicked()
 {
+    ui->processButton->setEnabled(false);
     int progress = 1;
-    QDate fromDate = ui->fromDateEdit->date();
-    QDate tillDate = ui->tillDateEdit->date();
+    const QDate fromDate = ui->fromDateEdit->date();
+    const QDate tillDate = ui->tillDateEdit->date();
     int good = 0;
     int bad = 0;
     int unknown = 0;
-    myCallsDbfTable.seek(0);
-    while (myCallsDbfTable.next()) {
-        ui->progressBar->setValue(progress++);
-        QDbf::QDbfRecord currentRecord = myCallsDbfTable.record();
+    while (myCallsTable.next()) {
+        ui->progressBar->setValue(++progress);
+        QDbf::QDbfRecord currentRecord = myCallsTable.record();
         const QDate date = currentRecord.value(trUtf8("DATE")).toDate();
         if (date < fromDate || date > tillDate)
             continue;
         const QString rawNumber = currentRecord.value(trUtf8("NUMBER")).toString();
-        QString number = formatPhone(rawNumber);
+        const QString number = formatPhone(rawNumber);
         if (number.isEmpty() || number.length() < 7) {
             bad++;
             continue;
@@ -104,16 +119,16 @@ void MainWindow::on_processButton_clicked()
         good++;
         int accountCode = myExtnamesList.indexOf(name);
         if (accountCode == -1) {
-            if (!myExtnamesDbfTable.addRecord())
-                continue;
-            //myExtnamesDbfTable.next();
-            QDbf::QDbfRecord newRecord = myExtnamesDbfTable.record();
+            myExtnamesTable.next();
+            QDbf::QDbfRecord newRecord = myExtnamesTable.record();
             accountCode = myExtnamesList.count();
             newRecord.setValue(trUtf8("ACCNTCODE"), accountCode);
             newRecord.setValue(trUtf8("NAME"), name);
+            myExtnamesTable.addRecord(newRecord);
             myExtnamesList.append(name);
         }
         currentRecord.setValue(trUtf8("ACCOUNT"), accountCode);
+        myCallsTable.updateRecordInTable(currentRecord);
     }
     QMessageBox::information(NULL,
                              trUtf8("Завершено"),
@@ -124,6 +139,8 @@ void MainWindow::on_processButton_clicked()
                              .arg(QString::number(good))
                              .arg(QString::number(bad))
                              .arg(QString::number(unknown)));
+    myCallsTable.close();
+    myExtnamesTable.close();
 }
 
 bool MainWindow::readPhoneBook()
@@ -136,12 +153,7 @@ bool MainWindow::readPhoneBook()
     QString pAgentsTableNames = mySettings.value(trUtf8("ORACLE/pagents"), trUtf8("PAGNLIST")).toString();
     QString agentNameField = mySettings.value(trUtf8("ORACLE/agentNameField"), trUtf8("NAME")).toString();
     QString pAgentNameField = mySettings.value(trUtf8("ORACLE/pAgentNameField"), trUtf8("NAME")).toString();
-    QStringList agentPhoneFields;
-//    agentPhoneFields.append(trUtf8("PHONE2"));
-//    agentPhoneFields.append(trUtf8("PHONE"));
-//    agentPhoneFields.append(trUtf8("FOX"));
-//    mySettings.setValue(trUtf8("ORACLE/agentPhoneFields"), agentPhoneFields);
-    agentPhoneFields = mySettings.value(trUtf8("ORACLE/agentPhoneFields"), trUtf8("AGNNAME, PHONE, FAX").split(trUtf8(", "))).toStringList();
+    QStringList agentPhoneFields = mySettings.value(trUtf8("ORACLE/agentPhoneFields"), trUtf8("AGNNAME, PHONE, FAX").split(trUtf8(", "))).toStringList();
     QStringList pAgentPhoneFields = mySettings.value(trUtf8("ORACLE/pAgentPhoneFields"), trUtf8("PHONE")).toStringList();
 
     QSqlDatabase oraDb = QSqlDatabase::addDatabase(trUtf8("QODBC"));
@@ -223,23 +235,23 @@ int MainWindow::fillTestDb()
 
     QSqlQuery query;
     query.prepare(trUtf8("insert into ") + agentsTableName + trUtf8(" values (:NAME, :PHONE, :PHONE2, :FAX)"));
-    while (myCallsDbfTable.next()) {
+    while (myCallsTable.next()) {
         ui->progressBar->setValue(progress++);
-        QDbf::QDbfRecord currentRecord = myCallsDbfTable.record();
+        QDbf::QDbfRecord currentRecord = myCallsTable.record();
         const QString rawPhone = currentRecord.value(trUtf8("NUMBER")).toString();
         QString phone = formatPhone(rawPhone);
         if (phone.isEmpty() || phone.length() < 7)
             continue;
-        if (!myCallsDbfTable.next())
+        if (!myCallsTable.next())
             continue;
-        currentRecord = myCallsDbfTable.record();
+        currentRecord = myCallsTable.record();
         const QString rawPhone2 = currentRecord.value(trUtf8("NUMBER")).toString();
         QString phone2 = formatPhone(rawPhone2);
         if (phone2.isEmpty() || phone2.length() < 7)
             continue;
-        if (!myCallsDbfTable.next())
+        if (!myCallsTable.next())
             continue;
-        currentRecord = myCallsDbfTable.record();
+        currentRecord = myCallsTable.record();
         const QString rawFax = currentRecord.value(trUtf8("NUMBER")).toString();
         QString fax = formatPhone(rawFax);
         if (fax.isEmpty() || fax.length() < 7)
@@ -257,4 +269,13 @@ int MainWindow::fillTestDb()
         }
     }
     oraDb.close();
+}
+
+void MainWindow::test()
+{
+    myExtnamesTable.next();
+    QDbf::QDbfRecord newRecord = myExtnamesTable.record();
+    newRecord.setValue(trUtf8("ACCNTCODE"), trUtf8("1"));
+    myExtnamesTable.addRecord(newRecord);
+    myExtnamesTable.close();
 }
