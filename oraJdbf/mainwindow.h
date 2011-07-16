@@ -35,8 +35,8 @@ private slots:
 
 private:
     Ui::MainWindow *ui;
-    QDbf::QDbfTable myCallsDbfTable;
-    QDbf::QDbfTable myExtnamesDbfTable;
+    QDbf::QDbfTable myCallsTable;
+    QDbf::QDbfTable myExtnamesTable;
     QStringList myExtnamesList;
     QHash<QString, QStringList> myPhoneBook;
 
@@ -44,6 +44,8 @@ private:
     QString formatPhone(const QString &number) const;
 
     int fillTestDb();
+
+    void test();
 };
 
 #endif // MAINWINDOW_H
