@@ -7,7 +7,6 @@ MainWindow::MainWindow(QWidget *parent) :
 {
     ui->setupUi(this);
     QDate currDate = QDate::currentDate();
-    int currDay = currDate.day();
     int curMonth = currDate.month();
     int currYear = currDate.year();
     QDate fromDate;
@@ -16,12 +15,16 @@ MainWindow::MainWindow(QWidget *parent) :
     tillDate = fromDate.addMonths(1).addDays(-1);
     ui->tillDateEdit->setDate(tillDate);
     ui->fromDateEdit->setDate(fromDate);
-    readPhoneBook();
+    openExtnamesTable();
+    readOraclePhoneBook();
+    modifyWintariffSettings();
 }
 
 MainWindow::~MainWindow()
 {
     delete ui;
+    myCallsTable.close();
+    myExtnamesTable.close();
 }
 
 void MainWindow::on_fromCalendarWidget_clicked(const QDate &date)
@@ -44,46 +47,73 @@ void MainWindow::on_tillDateEdit_dateChanged(const QDate &date)
     ui->tillCalendarWidget->setSelectedDate(date);
 }
 
-bool MainWindow::openFile()
+/*!
+  Открывает локальную рабочую копию таблицы Calls.
+*/
+bool MainWindow::openCallsTable()
 {
-    const QString caption = trUtf8("Выберите файл");
-    const QString filter = trUtf8("xBase files (*.dbf)");
-    const QString filePath = QFileDialog::getOpenFileName(NULL, caption, QDir::currentPath(), filter);
+    QSettings mySettings(trUtf8("orajdbf.ini"), QSettings::IniFormat);
+    const QString outputFolder = mySettings.value(trUtf8("oraJdbf/OutputFolder"), trUtf8("./")).toString();
+    QFileInfo f(QDir(outputFolder).canonicalPath() + trUtf8("/") + trUtf8("Calls.dbf"));
 
-    if (filePath.isNull()) {
-        return false;
-    }
-
-    if (!myCallsTable.open(filePath, QDbf::QDbfTable::ReadWrite)) {
+    if (!f.exists()) {
         const QString title = trUtf8("Ошибка открытия файла");
-        const QString text = QString(trUtf8("Невозможно открыть файл %1")).arg(filePath);
+        const QString text = QString(trUtf8("Невозможно открыть файл %1")).arg(f.fileName());
         QMessageBox::warning(NULL, title, text, QMessageBox::Ok);
         return false;
     }
 
-    const QSettings mySettings(trUtf8("orajdbf.ini"), QSettings::IniFormat);
-    const QString extnamesFilePath = mySettings.value(trUtf8("PATH/extnames"), trUtf8("Extnames.dbf")).toString();
-    const QString extnamesEmptyFilePath = mySettings.value(trUtf8("PATH/extnamesEmpty"), trUtf8("ExtnamesEmpty.dbf")).toString();
-
-    QFile::remove(extnamesFilePath);
-    QFile::copy(extnamesEmptyFilePath, extnamesFilePath);
-
-    if (!myExtnamesTable.open(extnamesFilePath, QDbf::QDbfTable::ReadWrite)) {
+    if (!myCallsTable.open(f.canonicalFilePath(), QDbf::QDbfTable::ReadWrite)) {
         const QString title = trUtf8("Ошибка открытия файла");
-        const QString text = QString(trUtf8("Невозможно открыть файл %1")).arg(extnamesFilePath);
+        const QString text = QString(trUtf8("Невозможно открыть файл %1")).arg(f.fileName());
         QMessageBox::warning(NULL, title, text, QMessageBox::Ok);
         return false;
     }
 
     ui->dbfFilePathLabel->setText(trUtf8("Выберите диапазон дат и нажмите \"Обработать\""));
-    //test();
     return true;
 }
 
+/*!
+  Открывает и читает локальную рабочую копию таблицы Extnames.
+*/
+bool MainWindow::openExtnamesTable()
+{
+    QSettings mySettings(trUtf8("orajdbf.ini"), QSettings::IniFormat);
+    const QString outputFolder = mySettings.value(trUtf8("oraJdbf/OutputFolder"), trUtf8("./")).toString();
+    QFileInfo f(QDir(outputFolder).canonicalPath() + trUtf8("/") + trUtf8("Extnames.dbf"));
+
+    if (!f.exists()) {
+        const QString title = trUtf8("Ошибка открытия файла");
+        const QString text = QString(trUtf8("Невозможно открыть файл %1")).arg(f.fileName());
+        QMessageBox::warning(NULL, title, text, QMessageBox::Ok);
+        return false;
+    }
+
+    if (!myExtnamesTable.open(f.canonicalFilePath(), QDbf::QDbfTable::ReadWrite)) {
+        const QString title = trUtf8("Ошибка открытия файла");
+        const QString text = QString(trUtf8("Невозможно открыть файл %1")).arg(f.fileName());
+        QMessageBox::warning(NULL, title, text, QMessageBox::Ok);
+        return false;
+    }
+
+    accountCodeOffset = 0;
+    if (myExtnamesTable.size() == 0)
+        return true;
+    while (myExtnamesTable.next()) {
+        QDbf::QDbfRecord currentRecord = myExtnamesTable.record();
+        const QString rawAccountCode = currentRecord.value(trUtf8("ACCNTCODE")).toString();
+        const uint accountCode = rawAccountCode.toUInt();
+        accountCodeOffset = accountCode > accountCodeOffset ? accountCode : accountCodeOffset;
+    }
+
+    return true;
+}
 
 void MainWindow::on_openDbfButton_clicked()
 {
-    ui->processButton->setEnabled(openFile());
+    ui->processButton->setEnabled(openCallsTable());
+    ui->openDbfButton->setEnabled(false);
     ui->progressBar->setValue(0);
     ui->progressBar->setMinimum(0);
     ui->progressBar->setMaximum(myCallsTable.size());
@@ -91,13 +121,13 @@ void MainWindow::on_openDbfButton_clicked()
 
 void MainWindow::on_processButton_clicked()
 {
-    ui->processButton->setEnabled(false);
     int progress = 1;
     const QDate fromDate = ui->fromDateEdit->date();
     const QDate tillDate = ui->tillDateEdit->date();
     int good = 0;
     int bad = 0;
     int unknown = 0;
+    myCallsTable.seek(0);
     while (myCallsTable.next()) {
         ui->progressBar->setValue(++progress);
         QDbf::QDbfRecord currentRecord = myCallsTable.record();
@@ -119,15 +149,14 @@ void MainWindow::on_processButton_clicked()
         good++;
         int accountCode = myExtnamesList.indexOf(name);
         if (accountCode == -1) {
-            myExtnamesTable.next();
             QDbf::QDbfRecord newRecord = myExtnamesTable.record();
             accountCode = myExtnamesList.count();
-            newRecord.setValue(trUtf8("ACCNTCODE"), accountCode);
+            newRecord.setValue(trUtf8("ACCNTCODE"), accountCode + accountCodeOffset);
             newRecord.setValue(trUtf8("NAME"), name);
             myExtnamesTable.addRecord(newRecord);
             myExtnamesList.append(name);
         }
-        currentRecord.setValue(trUtf8("ACCOUNT"), accountCode);
+        currentRecord.setValue(trUtf8("ACCOUNT"), accountCode + accountCodeOffset);
         myCallsTable.updateRecordInTable(currentRecord);
     }
     QMessageBox::information(NULL,
@@ -139,22 +168,23 @@ void MainWindow::on_processButton_clicked()
                              .arg(QString::number(good))
                              .arg(QString::number(bad))
                              .arg(QString::number(unknown)));
-    myCallsTable.close();
-    myExtnamesTable.close();
 }
 
-bool MainWindow::readPhoneBook()
+/*!
+  Читает из оракла контакты, форматирует номера и заносит их в память программы.
+*/
+bool MainWindow::readOraclePhoneBook()
 {
     QSettings mySettings(trUtf8("orajdbf.ini"), QSettings::IniFormat);
-    QString oraDnsName = mySettings.value(trUtf8("ORACLE/dnsname"), trUtf8("orajdbf")).toString();
-    QString oraUser = mySettings.value(trUtf8("ORACLE/user"), trUtf8("orajdbf")).toString();
-    QString oraPassword = mySettings.value(trUtf8("ORACLE/password"), trUtf8("orajdbf")).toString();
-    QString agentsTableName = mySettings.value(trUtf8("ORACLE/agents"), trUtf8("AGNLIST")).toString();
-    QString pAgentsTableNames = mySettings.value(trUtf8("ORACLE/pagents"), trUtf8("PAGNLIST")).toString();
-    QString agentNameField = mySettings.value(trUtf8("ORACLE/agentNameField"), trUtf8("NAME")).toString();
-    QString pAgentNameField = mySettings.value(trUtf8("ORACLE/pAgentNameField"), trUtf8("NAME")).toString();
-    QStringList agentPhoneFields = mySettings.value(trUtf8("ORACLE/agentPhoneFields"), trUtf8("AGNNAME, PHONE, FAX").split(trUtf8(", "))).toStringList();
-    QStringList pAgentPhoneFields = mySettings.value(trUtf8("ORACLE/pAgentPhoneFields"), trUtf8("PHONE")).toStringList();
+    QString oraDnsName = mySettings.value(trUtf8("ORACLE/DnsName"), trUtf8("orajdbf")).toString();
+    QString oraUser = mySettings.value(trUtf8("ORACLE/User"), trUtf8("orajdbf")).toString();
+    QString oraPassword = mySettings.value(trUtf8("ORACLE/Password"), trUtf8("orajdbf")).toString();
+    QString agentsTableName = mySettings.value(trUtf8("ORACLE/AgentsTblName"), trUtf8("AGNLIST")).toString();
+    QString pAgentsTableNames = mySettings.value(trUtf8("ORACLE/PagentsTblName"), trUtf8("PAGNLIST")).toString();
+    QString agentNameField = mySettings.value(trUtf8("ORACLE/AgentNameField"), trUtf8("NAME")).toString();
+    QString pAgentNameField = mySettings.value(trUtf8("ORACLE/PagentNameField"), trUtf8("NAME")).toString();
+    QStringList agentPhoneFields = mySettings.value(trUtf8("ORACLE/AgentPhoneFields"), trUtf8("PHONE2, PHONE, FAX").split(trUtf8(", "))).toStringList();
+    QStringList pAgentPhoneFields = mySettings.value(trUtf8("ORACLE/PagentPhoneFields"), trUtf8("PHONE")).toStringList();
 
     QSqlDatabase oraDb = QSqlDatabase::addDatabase(trUtf8("QODBC"));
     oraDb.setDatabaseName(oraDnsName);
@@ -186,7 +216,7 @@ bool MainWindow::readPhoneBook()
     query.prepare(trUtf8("select * from ") + pAgentsTableNames);
     if (!query.exec()) {
         oraDb.close();
-        QMessageBox::critical(NULL, trUtf8("Ошибка"), oraDb.lastError().text());
+        QMessageBox::critical(NULL, trUtf8("Ошибка"), trUtf8("Ошибка получения списка потенциальных клиентов. ") + oraDb.lastError().text());
         return false;
     }
 
@@ -210,6 +240,19 @@ QString MainWindow::formatPhone(const QString &number) const
     return result;
 }
 
+bool MainWindow::modifyWintariffSettings() const
+{
+    QSettings mySettings(trUtf8("orajdbf.ini"), QSettings::IniFormat);
+    const QString tariff32iniPath = mySettings.value(trUtf8("Wintariff/Tariff32ini"), trUtf8("Tariff32.ini")).toString();
+    const QString outputFolder = mySettings.value(trUtf8("oraJdbf/OutputFolder"), trUtf8("./")).toString();
+    QSettings Tariff32ini(tariff32iniPath, QSettings::IniFormat);
+    Tariff32ini.setValue(trUtf8("System/CallsFolder"), outputFolder);
+    Tariff32ini.setValue(trUtf8("System/SystemFolder"), outputFolder);
+}
+
+/*!
+  Для тестирования.
+*/
 int MainWindow::fillTestDb()
 {
     int progress = 1;

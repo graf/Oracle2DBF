@@ -13,7 +13,5 @@ int main(int argc, char *argv[])
 
     a.installTranslator(&qtTranslator);
     MainWindow w;
-    w.show();
-
-    return a.exec();
+    return w.exec();
 }
