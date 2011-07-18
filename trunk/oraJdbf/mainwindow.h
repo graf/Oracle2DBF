@@ -23,7 +23,7 @@ public:
     explicit MainWindow(QWidget *parent = 0);
     ~MainWindow();
 
-    bool openFile();
+    bool openCallsTable();
 
 private slots:
     void on_fromCalendarWidget_clicked(const QDate &date);
@@ -39,8 +39,11 @@ private:
     QDbf::QDbfTable myExtnamesTable;
     QStringList myExtnamesList;
     QHash<QString, QStringList> myPhoneBook;
+    uint accountCodeOffset;
 
-    bool readPhoneBook();
+    bool readOraclePhoneBook();
+    bool openExtnamesTable();
+    bool modifyWintariffSettings() const;
     QString formatPhone(const QString &number) const;
 
     int fillTestDb();
